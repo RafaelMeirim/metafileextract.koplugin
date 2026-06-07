@@ -9,6 +9,7 @@ A simple plugin to automatically extract metadata from filenames and sync synops
 
 ## Installation
 1. Download the plugin folder.
+https://github.com/RafaelMeirim/metafileextract.koplugin/releases/download/v1.0.0/metafileextract.koplugin.zip
 2. Connect your e-reader to your computer.
 3. Place the folder into `koreader/plugins/`.
 4. Restart KOReader.
