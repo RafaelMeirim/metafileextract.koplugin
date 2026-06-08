@@ -1,23 +1,54 @@
 # MetaFileExtract for KOReader
 
-A simple plugin to automatically extract metadata from filenames and sync synopses using external `.meta` files. Keep your library organized without needing external database software.
+A powerful plugin to automatically extract metadata from filenames, batch rename files, and sync synopses using external `.meta` files. Keep your library organized without needing external database software.
 
 ## Features
 * **Auto-Parsing:** Automatically detects Title, Author, Series, and Volume Index from your file names.
+* **Batch Rename:** Rename all files in a folder at once with customizable patterns.
+* **Sequential Numbering:** Add automatic numbering (e.g., `Title #1 - Author - Series #1`) to your files.
 * **Metadata Sync:** Uses simple `.meta` files for book or series descriptions.
 * **Clean Interface:** Uses `.meta` files, which are automatically ignored by KOReader's file manager to prevent clutter.
 
 ## Installation
 1. Download the plugin folder.
-https://github.com/RafaelMeirim/metafileextract.koplugin/releases/download/v1.0.0/metafileextract.koplugin.zip
+   https://github.com/RafaelMeirim/metafileextract.koplugin/releases/download/v1.0.0/metafileextract.koplugin.zip
 2. Connect your e-reader to your computer.
 3. Place the folder into `koreader/plugins/`.
 4. Restart KOReader.
 
-## How to use
-1. Open the File Manager in KOReader.
-2. Navigate to the folder containing your books.
-3. Tap the **Menu icon** (top right) and select **"Extract metadata from filenames"**.
+## How to Use
+
+### Single File Rename
+1. Press and hold a file in the File Manager.
+2. Tap **"Rename for MetaFileExtract"** from the context menu.
+3. Edit the metadata fields (Title, Authors, Keywords, Series, Series Number).
+4. Tap **"Rename"** to apply changes to both filename and metadata.
+
+### Batch Rename (Multiple Files)
+1. Navigate to the folder containing your books.
+2. Tap the **Menu icon** (top right) and select **"Rename All Files in Folder"**.
+3. Fill in the common fields:
+   - **Title:** Main title for all files (required)
+   - **Authors:** Author names (required)
+   - **Keywords:** Optional tags or categories
+   - **Series:** Series name (required)
+4. Configure options:
+   - **Ordering:** Choose sort order (From filename, Alphabetical, Date modified)
+   - **Numbering:** Toggle to include sequential numbers (e.g., `#1`, `#2`) after the title
+5. Tap **"Preview"** to see the changes before applying.
+6. Tap **"Rename All"** to execute.
+
+### Extract Metadata from Filenames
+1. Navigate to the folder containing your books.
+2. Tap the **Menu icon** (top right) and select **"Extract Metadata From Filenames"**.
+3. The plugin will parse all filenames and save the metadata to KOReader's database.
+
+### Using Descriptions (Synopses)
+1. Create a text file with your description.
+2. Rename it to match your **Book Title** or **Series Name** and change the extension to `.meta`.
+   - *Example:* `The Midnight Library.meta` or `Death Note.meta`.
+3. Place this file in the same folder as your books.
+4. Run **"Extract Metadata From Filenames"** to sync descriptions to your books.
 
 ## Filename Pattern
 The plugin uses the pattern: `Title - Author - Keyword(s) - Series Name #Index.ext`
@@ -30,6 +61,11 @@ The plugin uses the pattern: `Title - Author - Keyword(s) - Series Name #Index.e
 * `One Punch-Man - ONE & Yusuke Murata - Action - One Punch-Man #1.cbz`
 * `Harry Potter - J.K. Rowling - Fantasy - Harry Potter #1.epub`
 
+**With Sequential Numbering (Batch Rename):**
+* `Harry Potter #1 - J.K. Rowling - Fantasy - Harry Potter #1.epub`
+* `Harry Potter #2 - J.K. Rowling - Fantasy - Harry Potter #2.epub`
+* `Harry Potter #3 - J.K. Rowling - Fantasy - Harry Potter #3.epub`
+
 **Standalone Books:**
 * `The Midnight Library - Matt Haig - Fiction.epub`
 * `Rich Dad Poor Dad - Robert Kiyosaki & Sharon Lechter - Personal Finance.epub`
@@ -39,29 +75,26 @@ The plugin uses the pattern: `Title - Author - Keyword(s) - Series Name #Index.e
 > **Note on Authors and Keywords:** You can list multiple authors or keywords by separating them with `&` or `,`. 
 > *Example:* `Title - Author A & Author B - Sci-Fi, Space Opera - Series Name #1.epub`
 
-## Using Descriptions (Synopses)
-1. Create a text file with your description.
-2. Rename it to match your **Book Title** or **Series Name** and change the extension to `.meta`.
-   - *Example:* `The Midnight Library.meta` or `Death Note.meta`.
-3. Place this file in the same folder as your books.
-4. Run the plugin. It will prioritize the specific book file, then look for the series file.
+## Sorting Order Options
 
-## Bonus: Batch Renaming Tool (Windows)
-If you have a large library and want to standardize your filenames automatically, use the provided script in the `tools/` folder.
+When using Batch Rename, you can choose how files are ordered:
 
-### How to use:
-1. Copy `tools/rename.bat` to your book library folder on Windows.
-2. Make sure your files are named with a number (e.g., `1.cbz`, `2.cbz`...).
-3. Double-click `rename.bat` and follow the prompts:
-   - **Series/Book Title:** The main name.
-   - **Author:** The author's name.
-   - **Keyword:** Categories (e.g., `Manga` or `Sci-Fi`).
-   - **Series Name:** The name of the series (if applicable).
-   - **Include number:** Choose 'y' to keep the original numbering.
+| Order | Description |
+|-------|-------------|
+| **From filename** | Sorts by numbers found in original filenames |
+| **Alphabetical** | Sorts alphabetically by filename |
+| **Date modified** | Sorts by file modification date (oldest first) |
 
-The script will automatically rename your files to match the: `Title - Author - Keyword - Series Name #Number.ext` pattern.
+## Preview Mode
 
-> **Warning:** Always keep a backup of your files before running bulk renaming scripts.
+Before applying batch rename, use **Preview** to see all changes.
 
-## Troubleshooting
-If a book doesn't show a description, check your `koreader.log` file on the device. Ensure the `.meta` filename matches the title extracted by the plugin exactly (including spaces).
+The preview shows up to 10 files per page.
+
+## Important Notes
+
+- The plugin only works with supported formats: `.cbz`, `.cbr`, `.cbt`, `.epub`, `.pdf`, `.mobi`, `.azw`, `.azw3`, `.fb2`, `.djvu`, `.zip`
+- Metadata is stored in KOReader's `custom_props` and can be viewed in the book's information panel.
+- Batch rename saves metadata automatically - no need to run "Extract Metadata" afterward.
+
+> **Warning:** Always keep a backup of your files before running bulk renaming operations.
