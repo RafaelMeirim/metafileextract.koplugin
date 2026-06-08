@@ -32,6 +32,14 @@ local MODE_LABELS = {
 -- PLUGIN
 -- ─────────────────────────────────────────────────────────────────────────────
 
+-- Returns true only if path exists as a real directory on the filesystem.
+-- Virtual views (Authors, Series, Tags) in SimpleUI return fake paths that
+-- pass nil or non-existent strings — lfs.dir() on those crashes the renderer.
+local function isRealFolder(path)
+    if type(path) ~= "string" or path == "" then return false end
+    return lfs.attributes(path, "mode") == "directory"
+end
+
 local MetaFileExtract = WidgetContainer:extend{
     name        = "metafileextract",
     is_doc_only = false,
@@ -147,20 +155,22 @@ local function parseFilename(filename)
     return meta
 end
 
+--- Builds filename and metadata title from a meta table.
+-- When includeNumber=true the sequence number goes on the title only,
+-- NOT on the series field — avoids "Berserk #1 - ... - Berserk #1.cbz".
+--
+-- @return filename string, titleForMetadata string  (both nil on empty title)
 local function buildFilename(meta, ext, includeNumber, seqNum)
-    local parts = {}
     local title = trim(meta.title or "")
     if title == "" then return nil, nil end
-    
-    -- Título para o metadata (com #número sequencial se solicitado)
-    local titleForMetadata = title
-    if includeNumber and seqNum then
-        titleForMetadata = titleForMetadata .. " #" .. seqNum
-    end
-    
-    -- Título para o nome do arquivo
-    local titleForFilename = titleForMetadata
-    table.insert(parts, titleForFilename)
+
+    -- Title shown in metadata (and in filename when includeNumber is off)
+    -- When includeNumber is on, append #n to title instead of series field
+    local titleForMeta = includeNumber and seqNum
+        and (title .. " #" .. seqNum)
+        or  title
+
+    local parts = { titleForMeta }
 
     local authors = trim(meta.authors or "")
     if authors ~= "" then table.insert(parts, authors) end
@@ -170,11 +180,17 @@ local function buildFilename(meta, ext, includeNumber, seqNum)
 
     local series = trim(meta.series or "")
     if series ~= "" then
-        local idx = tonumber(meta.series_index)
-        table.insert(parts, idx and (series .. " #" .. idx) or series)
+        if includeNumber then
+            -- Number already on title — series without index
+            table.insert(parts, series)
+        else
+            -- Normal mode: series#index if available
+            local idx = tonumber(meta.series_index)
+            table.insert(parts, idx and (series .. " #" .. idx) or series)
+        end
     end
 
-    return table.concat(parts, " - ") .. "." .. ext, titleForMetadata
+    return table.concat(parts, " - ") .. "." .. ext, titleForMeta
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -261,10 +277,13 @@ end
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- SAFE RENAME
+-- os.rename on Android silently deletes the source when src and dst are on
+-- different filesystems (e.g. internal vs sdcard). We verify the destination
+-- exists after the call; if not, fall back to a manual copy + delete.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 local function safeRename(src, dst)
-    local ok, err = os.rename(src, dst)
+    local ok = os.rename(src, dst)
     if ok and lfs.attributes(dst, "mode") == "file" then
         return true
     end
@@ -289,9 +308,9 @@ local function safeRename(src, dst)
     fin:close()
     fout:close()
 
-    local srcAttr = lfs.attributes(src, "size")
-    local dstAttr = lfs.attributes(dst, "size")
-    if not dstAttr or (srcAttr and dstAttr < srcAttr) then
+    local srcSize = lfs.attributes(src, "size")
+    local dstSize = lfs.attributes(dst, "size")
+    if not dstSize or (srcSize and dstSize < srcSize) then
         os.remove(dst)
         return false, "copy verification failed"
     end
@@ -299,6 +318,10 @@ local function safeRename(src, dst)
     os.remove(src)
     return true
 end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- VALIDATION
+-- ─────────────────────────────────────────────────────────────────────────────
 
 local function validateBatchFields(fields)
     local missing = {}
@@ -414,22 +437,32 @@ function MetaFileExtract:showBatchRenameForm(folder, values, mode, includeNumber
         if not FileManager.instance then return end
         folder = FileManager.instance.file_chooser.path
     end
-    values = values or {}
-    mode   = mode   or "filename"
+
+    if not isRealFolder(folder) then
+        UIManager:show(InfoMessage:new{
+            text    = "This is not a real folder.\nPlease navigate to a folder first.",
+            timeout = 4,
+        })
+        return
+    end
+    values        = values        or {}
+    mode          = mode          or "filename"
     includeNumber = includeNumber or false
 
-    local numberingLabel = (includeNumber and "[x] Include #number  [ ] Don't include" or "[ ] Include #number  [x] Don't include")
+    local numberLabel = includeNumber
+        and "[x] Include #number  [ ] Don't include"
+        or  "[ ] Include #number  [x] Don't include"
 
     local dialog
     dialog = MultiInputDialog:new{
         title  = "Rename All Files in Folder",
         fields = {
-            { description = "Title *",          text = values.title    or "", hint = "Required"                       },
-            { description = "Authors *",        text = values.authors  or "", hint = "Required — Author 1, Author 2"  },
-            { description = "Keywords",         text = values.keywords or "", hint = "Optional — Keyword1, Keyword2"  },
-            { description = "Series *",         text = values.series   or "", hint = "Required"                       },
-            { description = "Ordering",         text = MODE_LABELS[mode],     hint = "Tap [Ordering] to cycle modes"  },
-            { description = "Number in Title",  text = numberingLabel,        hint = "Tap [Numbering] to toggle"      },
+            { description = "Title *",         text = values.title    or "", hint = "Required"                      },
+            { description = "Authors *",       text = values.authors  or "", hint = "Required — Author 1, Author 2" },
+            { description = "Keywords",        text = values.keywords or "", hint = "Optional — Keyword1, Keyword2" },
+            { description = "Series *",        text = values.series   or "", hint = "Required"                      },
+            { description = "Ordering",        text = MODE_LABELS[mode], hint = "Tap [Ordering] to cycle"           },
+            { description = "Number in Title", text = numberLabel,       hint = "Tap [Numbering] to toggle"         },
         },
         buttons = {
             {
@@ -445,10 +478,7 @@ function MetaFileExtract:showBatchRenameForm(folder, values, mode, includeNumber
                         UIManager:close(dialog)
                         UIManager:scheduleIn(0.05, function()
                             MetaFileExtract:showBatchRenameForm(folder, {
-                                title    = f[1],
-                                authors  = f[2],
-                                keywords = f[3],
-                                series   = f[4],
+                                title=f[1], authors=f[2], keywords=f[3], series=f[4]
                             }, nextMode(mode), includeNumber)
                         end)
                     end,
@@ -462,10 +492,7 @@ function MetaFileExtract:showBatchRenameForm(folder, values, mode, includeNumber
                         UIManager:close(dialog)
                         UIManager:scheduleIn(0.05, function()
                             MetaFileExtract:showBatchRenameForm(folder, {
-                                title    = f[1],
-                                authors  = f[2],
-                                keywords = f[3],
-                                series   = f[4],
+                                title=f[1], authors=f[2], keywords=f[3], series=f[4]
                             }, mode, not includeNumber)
                         end)
                     end,
@@ -475,21 +502,18 @@ function MetaFileExtract:showBatchRenameForm(folder, values, mode, includeNumber
                 {
                     text     = "Preview",
                     callback = function()
-                        local f = dialog:getFields()
-                        local numberingText = f[6] or ""
-                        local incNum = numberingText:match("%[x%] Include") ~= nil
+                        local f   = dialog:getFields()
                         local err = validateBatchFields(f)
                         if err then
                             UIManager:show(InfoMessage:new{ text = err, timeout = 3 })
                             return
                         end
+                        -- Read includeNumber from the live field text (survives reopen)
+                        local incNum = (f[6] or ""):match("%[x%] Include") ~= nil
                         UIManager:close(dialog)
                         UIManager:scheduleIn(0.05, function()
                             MetaFileExtract:showBatchPreview(folder, {
-                                title    = f[1],
-                                authors  = f[2],
-                                keywords = f[3],
-                                series   = f[4],
+                                title=f[1], authors=f[2], keywords=f[3], series=f[4]
                             }, mode, incNum)
                         end)
                     end,
@@ -497,20 +521,16 @@ function MetaFileExtract:showBatchRenameForm(folder, values, mode, includeNumber
                 {
                     text     = "Rename All",
                     callback = function()
-                        local f = dialog:getFields()
-                        local numberingText = f[6] or ""
-                        local incNum = numberingText:match("%[x%] Include") ~= nil
+                        local f   = dialog:getFields()
                         local err = validateBatchFields(f)
                         if err then
                             UIManager:show(InfoMessage:new{ text = err, timeout = 3 })
                             return
                         end
+                        local incNum = (f[6] or ""):match("%[x%] Include") ~= nil
                         UIManager:close(dialog)
                         MetaFileExtract:executeBatchRename(folder, {
-                            title    = f[1],
-                            authors  = f[2],
-                            keywords = f[3],
-                            series   = f[4],
+                            title=f[1], authors=f[2], keywords=f[3], series=f[4]
                         }, mode, incNum)
                     end,
                 },
@@ -523,6 +543,7 @@ end
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- BATCH PREVIEW
+-- Paginated via Trapper:confirm — no scroll widgets, no GPU crashes.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 function MetaFileExtract:showBatchPreview(folder, fields, mode, includeNumber)
@@ -534,12 +555,13 @@ function MetaFileExtract:showBatchPreview(folder, fields, mode, includeNumber)
 
     local entries = sortFiles(files, mode)
     local baseMeta = {
-        title    = sanitize(fields.title or ""),
-        authors  = sanitize(fields.authors or ""),
+        title    = sanitize(fields.title    or ""),
+        authors  = sanitize(fields.authors  or ""),
         keywords = sanitize(fields.keywords or ""),
-        series   = sanitize(fields.series or ""),
+        series   = sanitize(fields.series   or ""),
     }
 
+    -- Pre-build all rename pairs
     local pairs_list = {}
     for _, e in ipairs(entries) do
         local ext    = e.name:match("%.([^%.]+)$") or ""
@@ -550,24 +572,20 @@ function MetaFileExtract:showBatchPreview(folder, fields, mode, includeNumber)
             series       = baseMeta.series,
             series_index = e.seq,
         }
-        local newName, _ = buildFilename(newMeta, ext, includeNumber, e.seq)
-        table.insert(pairs_list, {
-            old = e.name,
-            new = newName or e.name,
-        })
+        local newName = buildFilename(newMeta, ext, includeNumber, e.seq) or e.name
+        table.insert(pairs_list, { old = e.name, new = newName })
     end
 
     local modeLabel = ({ filename="From filename", alpha="Alphabetical", date="Date modified" })[mode]
-    local numLabel = includeNumber and " (with #number)" or " (no #number)"
-
-    local PAGE_SIZE = 10
-    local page = 1
+    local numLabel  = includeNumber and " · #number on" or " · #number off"
+    local PAGE_SIZE = 8
     local total_pages = math.ceil(#pairs_list / PAGE_SIZE)
+    local page = 1
 
     Trapper:wrap(function()
         while true do
             local lines = {}
-            table.insert(lines, modeLabel .. numLabel .. " | " .. #entries .. " files")
+            table.insert(lines, modeLabel .. numLabel .. "  [" .. #entries .. " files]")
             table.insert(lines, "Page " .. page .. "/" .. total_pages)
             table.insert(lines, "")
 
@@ -575,19 +593,19 @@ function MetaFileExtract:showBatchPreview(folder, fields, mode, includeNumber)
             local to   = math.min(page * PAGE_SIZE, #pairs_list)
             for i = from, to do
                 local p = pairs_list[i]
+                -- "old name → new name" on two lines, visually clean
                 table.insert(lines, p.old)
                 table.insert(lines, "  → " .. p.new)
                 if i < to then table.insert(lines, "") end
             end
 
-            local has_next = page < total_pages
-            local btn_left  = page > 1 and "← Back" or "Cancel"
-            local btn_right = has_next    and "Next →" or "Rename All"
+            local btn_left  = page > 1           and "← Back" or "Cancel"
+            local btn_right = page < total_pages  and "Next →" or "Rename All"
 
-            local go = Trapper:confirm(table.concat(lines, "\n"), btn_left, btn_right, 900, 1000)
+            local go = Trapper:confirm(table.concat(lines, "\n"), btn_left, btn_right)
 
             if go then
-                if has_next then
+                if page < total_pages then
                     page = page + 1
                 else
                     MetaFileExtract:executeBatchRename(folder, fields, mode, includeNumber)
@@ -598,12 +616,7 @@ function MetaFileExtract:showBatchPreview(folder, fields, mode, includeNumber)
                     page = page - 1
                 else
                     UIManager:scheduleIn(0.05, function()
-                        MetaFileExtract:showBatchRenameForm(folder, {
-                            title    = fields.title,
-                            authors  = fields.authors,
-                            keywords = fields.keywords,
-                            series   = fields.series,
-                        }, mode, includeNumber)
+                        MetaFileExtract:showBatchRenameForm(folder, fields, mode, includeNumber)
                     end)
                     return
                 end
@@ -618,35 +631,36 @@ end
 
 function MetaFileExtract:executeBatchRename(folder, fields, mode, includeNumber)
     local baseMeta = {
-        title    = sanitize(fields.title or ""),
-        authors  = sanitize(fields.authors or ""),
+        title    = sanitize(fields.title    or ""),
+        authors  = sanitize(fields.authors  or ""),
         keywords = sanitize(fields.keywords or ""),
-        series   = sanitize(fields.series or ""),
+        series   = sanitize(fields.series   or ""),
     }
 
     local files   = MetaFileExtract:scanFolder(folder)
     local entries = sortFiles(files, mode)
 
     Trapper:wrap(function()
-        local success  = 0
-        local skipped  = 0
+        local success = 0
+        local skipped = 0
 
         for idx, e in ipairs(entries) do
-            local ext      = e.name:match("%.([^%.]+)$") or ""
-            local newMeta  = {
+            local ext     = e.name:match("%.([^%.]+)$") or ""
+            local newMeta = {
                 title        = baseMeta.title,
                 authors      = baseMeta.authors,
                 keywords     = baseMeta.keywords,
                 series       = baseMeta.series,
                 series_index = e.seq,
             }
+
             local newFilename, titleForMeta = buildFilename(newMeta, ext, includeNumber, e.seq)
             if not newFilename then skipped = skipped + 1 goto continue end
 
             local newFilepath = folder .. "/" .. newFilename
 
             local doNotAbort = Trapper:info(
-                T("Renaming %1/%2\n\n%3\n\n→ %4", idx, #entries, e.name, newFilename), true)
+                T("Renaming %1/%2\n\n%3\n→ %4", idx, #entries, e.name, newFilename), true)
             if not doNotAbort then Trapper:clear(); return end
 
             if newFilepath == e.path then
@@ -738,6 +752,14 @@ end
 function MetaFileExtract:onExtract()
     if not FileManager.instance then return end
     local folder = FileManager.instance.file_chooser.path
+
+    if not isRealFolder(folder) then
+        UIManager:show(InfoMessage:new{
+            text    = "This is not a real folder.\nPlease navigate to a folder first.",
+            timeout = 4,
+        })
+        return
+    end
 
     Trapper:wrap(function()
         local go = Trapper:confirm(
