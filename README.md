@@ -11,10 +11,10 @@ A powerful plugin to automatically extract metadata from filenames, batch rename
 
 ## Installation
 1. Download the plugin folder.
-   https://github.com/RafaelMeirim/metafileextract.koplugin/releases/download/v1.0.0/metafileextract.koplugin.zip
-2. Connect your e-reader to your computer.
-3. Place the folder into `koreader/plugins/`.
-4. Restart KOReader.
+   https://github.com/RafaelMeirim/metafileextract.koplugin/releases/download/v1.5.0/metafileextract.koplugin.zip
+3. Connect your e-reader to your computer.
+4. Place the folder into `koreader/plugins/`.
+5. Restart KOReader.
 
 ## How to Use
 
