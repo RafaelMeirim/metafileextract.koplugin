@@ -29,12 +29,394 @@ local MODE_LABELS = {
 }
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- NUMBER EXTRACTOR (unified logic for decimal numbers)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+local function stripExtension(filename)
+    return filename:match("^(.+)%.[^%.]+$") or filename
+end
+
+local function trim(s)
+    return s:match("^%s*(.-)%s*$") or ""
+end
+
+-- Extract decimal number from filename
+-- Returns: { full = 6.5, integer = 6, original = "6.5", normalized = "6.5" } or nil
+local function extractDecimalNumber(filename)
+    local base = stripExtension(filename)
+    
+    -- Try to find "Capítulo X" or "Chapter X" first (common in Mihon/Tachiyomi)
+    local cap_match = base:match("[Cc]ap[ií]tulo%s+(%d+[.,]?%d*)")
+    if not cap_match then
+        cap_match = base:match("[Cc]hapter%s+(%d+[.,]?%d*)")
+    end
+    if not cap_match then
+        cap_match = base:match("#(%d+[.,]?%d*)")
+    end
+    if not cap_match then
+        -- Look for any number at the end of the string
+        cap_match = base:match("(%d+[.,]?%d*)[^%d]*$")
+    end
+    if not cap_match then
+        -- Last resort: any number
+        cap_match = base:match("(%d+[.,]?%d*)")
+    end
+    
+    if cap_match then
+        -- Validate it's a proper number (digits, dot or comma only)
+        if cap_match:match("^%d+$") or cap_match:match("^%d+[.,]%d+$") then
+            local normalized = cap_match:gsub(",", ".")
+            local num = tonumber(normalized)
+            if num and num < 10000 then  -- plausible chapter number
+                return {
+                    full = num,
+                    integer = math.floor(num),
+                    original = cap_match,
+                    normalized = normalized
+                }
+            end
+        end
+    end
+    
+    return nil
+end
+
+-- Try to extract metadata from a filename (for auto-filling the form)
+-- Supports formats:
+-- - "Title - Authors - Series #number"
+-- - "Title - Authors - Keywords - Series #number"
+-- - "Title - Authors - Keywords"
+-- Returns { title, authors, keywords, series, series_index } or nil
+local function extractMetadataFromFilename(filename)
+    local base = stripExtension(filename)
+    local fields = {}
+    
+    -- Parse format: fields separated by " - "
+    for field in (base .. " - "):gmatch("(.-)%s%-%s") do
+        local f = trim(field)
+        if f ~= "" then table.insert(fields, f) end
+    end
+    
+    if #fields >= 2 then
+        local result = {
+            title = fields[1],
+            authors = fields[2],
+            keywords = nil,
+            series = nil,
+            series_index = nil
+        }
+        
+        -- Remove any #number from the title (for batch auto-fill only)
+        local titleWithoutNumber = result.title:gsub("%s*#%d+[.,]?%d*%s*$", "")
+        if titleWithoutNumber ~= result.title then
+            result.title = titleWithoutNumber
+        end
+        
+        if #fields >= 3 then
+            -- Check if third field is keywords or part of series
+            local thirdField = fields[3]
+            local seriesName, seriesNum = thirdField:match("^(.-)%s*#(%d+[.,]?%d*)%s*$")
+            
+            if seriesName then
+                -- Format: "Title - Authors - Series #number"
+                result.series = trim(seriesName)
+                local normalized = seriesNum:gsub(",", ".")
+                result.series_index = tonumber(normalized)
+            else
+                -- Format: "Title - Authors - Keywords"
+                result.keywords = thirdField
+                
+                -- Check if there's a fourth field (Series)
+                if #fields >= 4 then
+                    local fourthField = fields[4]
+                    local seriesName2, seriesNum2 = fourthField:match("^(.-)%s*#(%d+[.,]?%d*)%s*$")
+                    if seriesName2 then
+                        result.series = trim(seriesName2)
+                        local normalized = seriesNum2:gsub(",", ".")
+                        result.series_index = tonumber(normalized)
+                    else
+                        result.series = fourthField
+                    end
+                end
+            end
+        end
+        
+        return result
+    end
+    
+    return nil
+end
+
+-- Get the most common metadata from a folder (based on first valid file)
+local function inferFolderMetadata(folder)
+    local files = {}
+    for entry in lfs.dir(folder) do
+        if entry ~= "." and entry ~= ".." then
+            local full = folder .. "/" .. entry
+            local attr = lfs.attributes(full)
+            if attr and attr.mode == "file" then
+                local ext = entry:match("%.([^%.]+)$")
+                if ext and SUPPORTED[ext:lower()] then
+                    table.insert(files, entry)
+                end
+            end
+        end
+    end
+    
+    -- Try to extract metadata from the first file that has a valid pattern
+    for _, file in ipairs(files) do
+        local meta = extractMetadataFromFilename(file)
+        if meta and meta.title and meta.authors then
+            return meta
+        end
+    end
+    
+    return nil
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- PARSER / BUILDER
+-- ─────────────────────────────────────────────────────────────────────────────
+
+local function sanitize(s)
+    return trim(s):gsub('[\\/:*?"<>|]', "_")
+end
+
+local function parseFilename(filename)
+    local base = stripExtension(filename)
+    local meta = {}
+    local fields = {}
+
+    for field in (base .. " - "):gmatch("(.-)%s%-%s") do
+        local f = trim(field)
+        if f ~= "" then table.insert(fields, f) end
+    end
+
+    if #fields == 0 then
+        meta.title = base
+        return meta
+    end
+
+    meta.title = fields[1]
+    local count = #fields
+
+    if count >= 2 then
+        local lastField = fields[count]
+        local seriesName, seriesNum = lastField:match("^(.-)%s*#(%d+)%s*$")
+
+        if seriesName then
+            meta.series       = trim(seriesName)
+            meta.series_index = tonumber(seriesNum)
+            if count == 3 then
+                meta.authors = fields[2]
+            elseif count >= 4 then
+                meta.authors  = fields[2]
+                meta.keywords = fields[3]
+            end
+        else
+            meta.authors = fields[2]
+            if count >= 3 then meta.keywords = fields[3] end
+            if count >= 4 then
+                local s, n = fields[4]:match("^(.-)%s*#(%d+)%s*$")
+                if s then
+                    meta.series       = trim(s)
+                    meta.series_index = tonumber(n)
+                else
+                    meta.series = trim(fields[4])
+                end
+            end
+        end
+    end
+
+    return meta
+end
+
+--- Builds filename and metadata title from a meta table.
+-- When includeNumberInTitle=true, appends #number to titleDisplay and titleForMeta.
+-- The series field ALWAYS gets the number (for sorting) if series_index exists.
+--
+-- @return filename string, titleForMetadata string (both nil if title empty)
+local function buildFilename(meta, ext, includeNumberInTitle, fileNumber)
+    local title = trim(meta.title or "")
+    if title == "" then return nil, nil end
+
+    -- Title for metadata and display
+    local titleForMeta = title
+    local titleDisplay = title
+    
+    -- Only add #number to title if explicitly requested
+    if includeNumberInTitle and fileNumber and fileNumber.full then
+        titleDisplay = title .. " #" .. fileNumber.full
+        titleForMeta = title .. " #" .. fileNumber.full
+    end
+
+    local parts = { titleDisplay }
+
+    local authors = trim(meta.authors or "")
+    if authors ~= "" then table.insert(parts, authors) end
+
+    local keywords = trim(meta.keywords or "")
+    if keywords ~= "" then table.insert(parts, keywords) end
+
+    local series = trim(meta.series or "")
+    if series ~= "" then
+        -- Series ALWAYS gets the number if available (for sorting)
+        if meta.series_index then
+            table.insert(parts, series .. " #" .. meta.series_index)
+        elseif fileNumber and fileNumber.integer then
+            table.insert(parts, series .. " #" .. fileNumber.integer)
+        else
+            table.insert(parts, series)
+        end
+    end
+
+    return table.concat(parts, " - ") .. "." .. ext, titleForMeta
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- SORTING (with decimal number support)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+local function sortFiles(files, mode)
+    local entries = {}
+    for _, fp in ipairs(files) do
+        local name = fp:match("[^/]+$") or fp
+        local numInfo = nil
+        
+        -- Protect against extraction errors
+        xpcall(function()
+            numInfo = extractDecimalNumber(name)
+        end, function(err)
+            logger.warn("extractDecimalNumber error: " .. tostring(err))
+        end)
+        
+        local attr = lfs.attributes(fp)
+        table.insert(entries, {
+            path    = fp,
+            name    = name,
+            num_info = numInfo,
+            sort_key = numInfo and numInfo.full or nil,
+            modtime = attr and attr.modification or 0,
+        })
+    end
+
+    if mode == "filename" then
+        table.sort(entries, function(a, b)
+            if a.sort_key and b.sort_key then
+                return a.sort_key < b.sort_key
+            end
+            if a.sort_key then return true end
+            if b.sort_key then return false end
+            return a.name < b.name
+        end)
+    elseif mode == "date" then
+        table.sort(entries, function(a, b)
+            if a.modtime ~= b.modtime then return a.modtime < b.modtime end
+            return a.name < b.name
+        end)
+    else -- alpha
+        table.sort(entries, function(a, b) return a.name < b.name end)
+    end
+
+    -- Assign sequential seq AFTER sorting
+    for i, e in ipairs(entries) do
+        e.seq = i
+        -- If no number, create fallback based on seq
+        if not e.num_info then
+            e.num_info = {
+                full = i,
+                integer = i,
+                original = tostring(i),
+                normalized = tostring(i)
+            }
+        end
+    end
+
+    return entries
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- METADATA WRITER
+-- ─────────────────────────────────────────────────────────────────────────────
+
+local function writeMetadata(filepath, meta)
+    local ok, err = pcall(function()
+        local settings = DocSettings.openSettingsFile(filepath)
+        if not settings then error("openSettingsFile returned nil") end
+
+        local customProps = settings:readSetting("custom_props")
+        if type(customProps) ~= "table" then customProps = {} end
+
+        if meta.title        then customProps.title        = tostring(meta.title)        end
+        if meta.authors      then customProps.authors      = tostring(meta.authors)      end
+        if meta.keywords     then customProps.keywords     = tostring(meta.keywords)     end
+        if meta.series       then customProps.series       = tostring(meta.series)       end
+        if meta.series_index then customProps.series_index = tostring(meta.series_index) end
+        if meta.description  then customProps.description  = tostring(meta.description)  end
+
+        local docProps = settings:readSetting("doc_props")
+        if type(docProps) ~= "table" then settings:saveSetting("doc_props", {}) end
+
+        settings:saveSetting("custom_props", customProps)
+        settings:flushCustomMetadata(filepath)
+    end)
+
+    if not ok then
+        logger.warn("MetaFileExtract: failed for " .. filepath .. ": " .. tostring(err))
+        return false
+    end
+    return true
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- SAFE RENAME
+-- os.rename on Android silently deletes source when src and dst are on
+-- different filesystems (e.g., internal vs sdcard). Verify destination exists
+-- after call; if not, fall back to manual copy + delete.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+local function safeRename(src, dst)
+    local ok = os.rename(src, dst)
+    if ok and lfs.attributes(dst, "mode") == "file" then
+        return true
+    end
+
+    local fin, ferr = io.open(src, "rb")
+    if not fin then
+        return false, "cannot open source: " .. tostring(ferr)
+    end
+
+    local fout, oerr = io.open(dst, "wb")
+    if not fout then
+        fin:close()
+        return false, "cannot open dest: " .. tostring(oerr)
+    end
+
+    local CHUNK = 64 * 1024
+    while true do
+        local data = fin:read(CHUNK)
+        if not data then break end
+        fout:write(data)
+    end
+    fin:close()
+    fout:close()
+
+    local srcSize = lfs.attributes(src, "size")
+    local dstSize = lfs.attributes(dst, "size")
+    if not dstSize or (srcSize and dstSize < srcSize) then
+        os.remove(dst)
+        return false, "copy verification failed"
+    end
+
+    os.remove(src)
+    return true
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- PLUGIN
 -- ─────────────────────────────────────────────────────────────────────────────
 
 -- Returns true only if path exists as a real directory on the filesystem.
--- Virtual views (Authors, Series, Tags) in SimpleUI return fake paths that
--- pass nil or non-existent strings — lfs.dir() on those crashes the renderer.
 local function isRealFolder(path)
     if type(path) ~= "string" or path == "" then return false end
     return lfs.attributes(path, "mode") == "directory"
@@ -91,235 +473,6 @@ function MetaFileExtract:addToMainMenu(menu_items)
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- PARSER / BUILDER
--- ─────────────────────────────────────────────────────────────────────────────
-
-local function stripExtension(filename)
-    return filename:match("^(.+)%.[^%.]+$") or filename
-end
-
-local function trim(s)
-    return s:match("^%s*(.-)%s*$")
-end
-
-local function sanitize(s)
-    return trim(s):gsub('[\\/:*?"<>|]', "_")
-end
-
-local function parseFilename(filename)
-    local base = stripExtension(filename)
-    local meta = {}
-    local fields = {}
-
-    for field in (base .. " - "):gmatch("(.-)%s%-%s") do
-        local f = trim(field)
-        if f ~= "" then table.insert(fields, f) end
-    end
-
-    if #fields == 0 then
-        meta.title = base
-        return meta
-    end
-
-    meta.title = fields[1]
-    local count = #fields
-
-    if count >= 2 then
-        local lastField = fields[count]
-        local seriesName, seriesNum = lastField:match("^(.-)%s*#(%d+)%s*$")
-
-        if seriesName then
-            meta.series       = trim(seriesName)
-            meta.series_index = tonumber(seriesNum)
-            if count == 3 then
-                meta.authors = fields[2]
-            elseif count >= 4 then
-                meta.authors  = fields[2]
-                meta.keywords = fields[3]
-            end
-        else
-            meta.authors = fields[2]
-            if count >= 3 then meta.keywords = fields[3] end
-            if count >= 4 then
-                local s, n = fields[4]:match("^(.-)%s*#(%d+)%s*$")
-                if s then
-                    meta.series       = trim(s)
-                    meta.series_index = tonumber(n)
-                else
-                    meta.series = trim(fields[4])
-                end
-            end
-        end
-    end
-
-    return meta
-end
-
---- Builds filename and metadata title from a meta table.
--- When includeNumber=true the sequence number goes on the title only,
--- NOT on the series field — avoids "Berserk #1 - ... - Berserk #1.cbz".
---
--- @return filename string, titleForMetadata string  (both nil on empty title)
-local function buildFilename(meta, ext, includeNumber, seqNum)
-    local title = trim(meta.title or "")
-    if title == "" then return nil, nil end
-
-    -- Title shown in metadata (and in filename when includeNumber is off)
-    -- When includeNumber is on, append #n to title instead of series field
-    local titleForMeta = includeNumber and seqNum
-        and (title .. " #" .. seqNum)
-        or  title
-
-    local parts = { titleForMeta }
-
-    local authors = trim(meta.authors or "")
-    if authors ~= "" then table.insert(parts, authors) end
-
-    local keywords = trim(meta.keywords or "")
-    if keywords ~= "" then table.insert(parts, keywords) end
-
-    local series = trim(meta.series or "")
-    if series ~= "" then
-        if includeNumber then
-            -- Number already on title — series without index
-            table.insert(parts, series)
-        else
-            -- Normal mode: series#index if available
-            local idx = tonumber(meta.series_index)
-            table.insert(parts, idx and (series .. " #" .. idx) or series)
-        end
-    end
-
-    return table.concat(parts, " - ") .. "." .. ext, titleForMeta
-end
-
--- ─────────────────────────────────────────────────────────────────────────────
--- NUMBERING
--- ─────────────────────────────────────────────────────────────────────────────
-
-local function extractNumber(filename)
-    local base = stripExtension(filename)
-    return tonumber(base:match("(%d+)[^%d]*$"))
-end
-
-local function nextMode(mode)
-    for i, m in ipairs(MODES) do
-        if m == mode then return MODES[(i % #MODES) + 1] end
-    end
-    return MODES[1]
-end
-
-local function sortFiles(files, mode)
-    local entries = {}
-    for _, fp in ipairs(files) do
-        local name = fp:match("[^/]+$") or fp
-        local attr = lfs.attributes(fp)
-        table.insert(entries, {
-            path    = fp,
-            name    = name,
-            number  = extractNumber(name),
-            modtime = attr and attr.modification or 0,
-        })
-    end
-
-    if mode == "filename" then
-        table.sort(entries, function(a, b)
-            if a.number and b.number then return a.number < b.number end
-            if a.number then return true end
-            if b.number then return false end
-            return a.name < b.name
-        end)
-    elseif mode == "date" then
-        table.sort(entries, function(a, b)
-            if a.modtime ~= b.modtime then return a.modtime < b.modtime end
-            return a.name < b.name
-        end)
-    else
-        table.sort(entries, function(a, b) return a.name < b.name end)
-    end
-
-    for i, e in ipairs(entries) do e.seq = i end
-    return entries
-end
-
--- ─────────────────────────────────────────────────────────────────────────────
--- METADATA WRITER
--- ─────────────────────────────────────────────────────────────────────────────
-
-local function writeMetadata(filepath, meta)
-    local ok, err = pcall(function()
-        local settings = DocSettings.openSettingsFile(filepath)
-        if not settings then error("openSettingsFile returned nil") end
-
-        local customProps = settings:readSetting("custom_props")
-        if type(customProps) ~= "table" then customProps = {} end
-
-        if meta.title        then customProps.title        = tostring(meta.title)        end
-        if meta.authors      then customProps.authors      = tostring(meta.authors)      end
-        if meta.keywords     then customProps.keywords     = tostring(meta.keywords)     end
-        if meta.series       then customProps.series       = tostring(meta.series)       end
-        if meta.series_index then customProps.series_index = tostring(meta.series_index) end
-        if meta.description  then customProps.description  = tostring(meta.description)  end
-
-        local docProps = settings:readSetting("doc_props")
-        if type(docProps) ~= "table" then settings:saveSetting("doc_props", {}) end
-
-        settings:saveSetting("custom_props", customProps)
-        settings:flushCustomMetadata(filepath)
-    end)
-
-    if not ok then
-        logger.warn("MetaFileExtract: failed for " .. filepath .. ": " .. tostring(err))
-        return false
-    end
-    return true
-end
-
--- ─────────────────────────────────────────────────────────────────────────────
--- SAFE RENAME
--- os.rename on Android silently deletes the source when src and dst are on
--- different filesystems (e.g. internal vs sdcard). We verify the destination
--- exists after the call; if not, fall back to a manual copy + delete.
--- ─────────────────────────────────────────────────────────────────────────────
-
-local function safeRename(src, dst)
-    local ok = os.rename(src, dst)
-    if ok and lfs.attributes(dst, "mode") == "file" then
-        return true
-    end
-
-    local fin, ferr = io.open(src, "rb")
-    if not fin then
-        return false, "cannot open source: " .. tostring(ferr)
-    end
-
-    local fout, oerr = io.open(dst, "wb")
-    if not fout then
-        fin:close()
-        return false, "cannot open dest: " .. tostring(oerr)
-    end
-
-    local CHUNK = 64 * 1024
-    while true do
-        local data = fin:read(CHUNK)
-        if not data then break end
-        fout:write(data)
-    end
-    fin:close()
-    fout:close()
-
-    local srcSize = lfs.attributes(src, "size")
-    local dstSize = lfs.attributes(dst, "size")
-    if not dstSize or (srcSize and dstSize < srcSize) then
-        os.remove(dst)
-        return false, "copy verification failed"
-    end
-
-    os.remove(src)
-    return true
-end
-
--- ─────────────────────────────────────────────────────────────────────────────
 -- VALIDATION
 -- ─────────────────────────────────────────────────────────────────────────────
 
@@ -335,7 +488,9 @@ local function validateBatchFields(fields)
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- SINGLE FILE RENAME
+-- SINGLE FILE RENAME (Context Menu)
+-- User has full control. NEVER adds #number to title automatically.
+-- Series number field is ONLY for the series field, NEVER for title.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 function MetaFileExtract:showRenameForm(filepath)
@@ -343,18 +498,19 @@ function MetaFileExtract:showRenameForm(filepath)
     local folder   = filepath:match("^(.*)/[^/]+$") or ""
     local ext      = filename:match("%.([^%.]+)$") or ""
     local meta     = parseFilename(filename)
+    local numInfo  = extractDecimalNumber(filename)
 
     local dialog
     dialog = MultiInputDialog:new{
         title  = "Rename for MetaFileExtract",
         fields = {
-            { description = "Title",         text = meta.title    or "", hint = "Book title"         },
+            { description = "Title",         text = meta.title    or "", hint = "Book title (can include #number if desired)" },
             { description = "Authors",       text = meta.authors  or "", hint = "Author 1, Author 2" },
             { description = "Keywords",      text = meta.keywords or "", hint = "Keyword1, Keyword2" },
-            { description = "Series",        text = meta.series   or "", hint = "Series name"        },
+            { description = "Series",        text = meta.series   or "", hint = "Series name" },
             { description = "Series number",
-              text        = meta.series_index and tostring(meta.series_index) or "",
-              hint        = "e.g. 1", input_type = "number" },
+              text        = meta.series_index and tostring(meta.series_index) or (numInfo and tostring(numInfo.full) or ""),
+              hint        = "For series sorting only (e.g., 1 or 6.5)", input_type = "text" },
         },
         buttons = {
             {
@@ -365,12 +521,24 @@ function MetaFileExtract:showRenameForm(filepath)
                         local fields = dialog:getFields()
                         UIManager:close(dialog)
 
+                        local seriesNumRaw = trim(fields[5] or "")
+                        local seriesNum = nil
+                        
+                        if seriesNumRaw ~= "" then
+                            -- Try to convert to number (supports 6.5)
+                            local normalized = seriesNumRaw:gsub(",", ".")
+                            local num = tonumber(normalized)
+                            if num then
+                                seriesNum = num
+                            end
+                        end
+
                         local newMeta = {
                             title        = sanitize(fields[1] or ""),
                             authors      = sanitize(fields[2] or ""),
                             keywords     = sanitize(fields[3] or ""),
                             series       = sanitize(fields[4] or ""),
-                            series_index = tonumber(fields[5]),
+                            series_index = seriesNum,
                         }
 
                         if newMeta.title == "" then
@@ -378,6 +546,10 @@ function MetaFileExtract:showRenameForm(filepath)
                             return
                         end
 
+                        -- For context menu: 
+                        -- includeNumberInTitle = false (never add #number to title from series number)
+                        -- fileNumber = nil (series number is ONLY for the series field, not for title)
+                        -- The title is used EXACTLY as typed by the user
                         local newFilename, titleForMeta = buildFilename(newMeta, ext, false, nil)
                         if not newFilename then
                             UIManager:show(InfoMessage:new{ text = "Failed to build filename.", timeout = 3 })
@@ -445,13 +617,42 @@ function MetaFileExtract:showBatchRenameForm(folder, values, mode, includeNumber
         })
         return
     end
-    values        = values        or {}
+    
+    -- Auto-infer metadata from folder if values not provided
+    if not values or not values.title then
+        local inferred = inferFolderMetadata(folder)
+        if inferred then
+            values = {
+                title = inferred.title or "",
+                authors = inferred.authors or "",
+                keywords = inferred.keywords or "",
+                series = inferred.series or "",
+            }
+        else
+            values = values or {}
+        end
+    end
+    
     mode          = mode          or "filename"
-    includeNumber = includeNumber or false
+    -- Default to true (include #number in title for batch rename)
+    includeNumber = (includeNumber == nil) and true or includeNumber
 
     local numberLabel = includeNumber
         and "[x] Include #number  [ ] Don't include"
         or  "[ ] Include #number  [x] Don't include"
+
+    -- Simple next mode functions (no closure issues)
+    local function getNextMode(current)
+        if current == "filename" then return "alpha"
+        elseif current == "alpha" then return "date"
+        else return "filename" end
+    end
+
+    local function getModeLabel(m)
+        if m == "filename" then return MODE_LABELS.filename
+        elseif m == "alpha" then return MODE_LABELS.alpha
+        else return MODE_LABELS.date end
+    end
 
     local dialog
     dialog = MultiInputDialog:new{
@@ -461,7 +662,7 @@ function MetaFileExtract:showBatchRenameForm(folder, values, mode, includeNumber
             { description = "Authors *",       text = values.authors  or "", hint = "Required — Author 1, Author 2" },
             { description = "Keywords",        text = values.keywords or "", hint = "Optional — Keyword1, Keyword2" },
             { description = "Series *",        text = values.series   or "", hint = "Required"                      },
-            { description = "Ordering",        text = MODE_LABELS[mode], hint = "Tap [Ordering] to cycle"           },
+            { description = "Ordering",        text = getModeLabel(mode), hint = "Tap [Ordering] to cycle"         },
             { description = "Number in Title", text = numberLabel,       hint = "Tap [Numbering] to toggle"         },
         },
         buttons = {
@@ -469,17 +670,22 @@ function MetaFileExtract:showBatchRenameForm(folder, values, mode, includeNumber
                 {
                     text     = "Cancel",
                     id       = "close",
-                    callback = function() UIManager:close(dialog) end,
+                    callback = function() 
+                        UIManager:close(dialog)
+                    end,
                 },
                 {
                     text     = "Ordering",
                     callback = function()
                         local f = dialog:getFields()
+                        local newMode = getNextMode(mode)
+                        local newInclude = (f[6] or ""):match("%[x%] Include") ~= nil
                         UIManager:close(dialog)
-                        UIManager:scheduleIn(0.05, function()
+                        -- Use schedule to avoid nested dialog issues
+                        UIManager:scheduleIn(0.1, function()
                             MetaFileExtract:showBatchRenameForm(folder, {
                                 title=f[1], authors=f[2], keywords=f[3], series=f[4]
-                            }, nextMode(mode), includeNumber)
+                            }, newMode, newInclude)
                         end)
                     end,
                 },
@@ -489,11 +695,12 @@ function MetaFileExtract:showBatchRenameForm(folder, values, mode, includeNumber
                     text     = "Numbering",
                     callback = function()
                         local f = dialog:getFields()
+                        local newInclude = not ((f[6] or ""):match("%[x%] Include") ~= nil)
                         UIManager:close(dialog)
-                        UIManager:scheduleIn(0.05, function()
+                        UIManager:scheduleIn(0.1, function()
                             MetaFileExtract:showBatchRenameForm(folder, {
                                 title=f[1], authors=f[2], keywords=f[3], series=f[4]
-                            }, mode, not includeNumber)
+                            }, mode, newInclude)
                         end)
                     end,
                 },
@@ -502,16 +709,15 @@ function MetaFileExtract:showBatchRenameForm(folder, values, mode, includeNumber
                 {
                     text     = "Preview",
                     callback = function()
-                        local f   = dialog:getFields()
+                        local f = dialog:getFields()
                         local err = validateBatchFields(f)
                         if err then
                             UIManager:show(InfoMessage:new{ text = err, timeout = 3 })
                             return
                         end
-                        -- Read includeNumber from the live field text (survives reopen)
                         local incNum = (f[6] or ""):match("%[x%] Include") ~= nil
                         UIManager:close(dialog)
-                        UIManager:scheduleIn(0.05, function()
+                        UIManager:scheduleIn(0.1, function()
                             MetaFileExtract:showBatchPreview(folder, {
                                 title=f[1], authors=f[2], keywords=f[3], series=f[4]
                             }, mode, incNum)
@@ -521,7 +727,7 @@ function MetaFileExtract:showBatchRenameForm(folder, values, mode, includeNumber
                 {
                     text     = "Rename All",
                     callback = function()
-                        local f   = dialog:getFields()
+                        local f = dialog:getFields()
                         local err = validateBatchFields(f)
                         if err then
                             UIManager:show(InfoMessage:new{ text = err, timeout = 3 })
@@ -543,7 +749,6 @@ end
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- BATCH PREVIEW
--- Paginated via Trapper:confirm — no scroll widgets, no GPU crashes.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 function MetaFileExtract:showBatchPreview(folder, fields, mode, includeNumber)
@@ -564,15 +769,16 @@ function MetaFileExtract:showBatchPreview(folder, fields, mode, includeNumber)
     -- Pre-build all rename pairs
     local pairs_list = {}
     for _, e in ipairs(entries) do
-        local ext    = e.name:match("%.([^%.]+)$") or ""
+        local ext = e.name:match("%.([^%.]+)$") or ""
         local newMeta = {
             title        = baseMeta.title,
             authors      = baseMeta.authors,
             keywords     = baseMeta.keywords,
             series       = baseMeta.series,
-            series_index = e.seq,
+            series_index = e.num_info and e.num_info.integer or e.seq,
         }
-        local newName = buildFilename(newMeta, ext, includeNumber, e.seq) or e.name
+        -- For batch rename, use includeNumber as requested by user
+        local newName = buildFilename(newMeta, ext, includeNumber, e.num_info) or e.name
         table.insert(pairs_list, { old = e.name, new = newName })
     end
 
@@ -593,7 +799,6 @@ function MetaFileExtract:showBatchPreview(folder, fields, mode, includeNumber)
             local to   = math.min(page * PAGE_SIZE, #pairs_list)
             for i = from, to do
                 local p = pairs_list[i]
-                -- "old name → new name" on two lines, visually clean
                 table.insert(lines, p.old)
                 table.insert(lines, "  → " .. p.new)
                 if i < to then table.insert(lines, "") end
@@ -645,16 +850,16 @@ function MetaFileExtract:executeBatchRename(folder, fields, mode, includeNumber)
         local skipped = 0
 
         for idx, e in ipairs(entries) do
-            local ext     = e.name:match("%.([^%.]+)$") or ""
+            local ext = e.name:match("%.([^%.]+)$") or ""
             local newMeta = {
                 title        = baseMeta.title,
                 authors      = baseMeta.authors,
                 keywords     = baseMeta.keywords,
                 series       = baseMeta.series,
-                series_index = e.seq,
+                series_index = e.num_info and e.num_info.integer or e.seq,
             }
 
-            local newFilename, titleForMeta = buildFilename(newMeta, ext, includeNumber, e.seq)
+            local newFilename, titleForMeta = buildFilename(newMeta, ext, includeNumber, e.num_info)
             if not newFilename then skipped = skipped + 1 goto continue end
 
             local newFilepath = folder .. "/" .. newFilename
@@ -784,6 +989,12 @@ function MetaFileExtract:onExtract()
             local meta = parseFilename(filename)
             local desc = getMetadataFile(folder, meta, filename)
             if desc then meta.description = desc end
+            
+            -- Extract number from file for series_index if available
+            local numInfo = extractDecimalNumber(filename)
+            if numInfo and not meta.series_index then
+                meta.series_index = numInfo.integer
+            end
 
             if meta.title then
                 local complete, ok = Trapper:dismissableRunInSubprocess(function()
