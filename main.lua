@@ -43,29 +43,26 @@ end
 local function extractDecimalNumber(filename)
     local base = stripExtension(filename)
     
-    local cap_match = base:match("[Cc]ap[ií]tulo%s+(%d+[.,]?%d*)")
-    if not cap_match then
-        cap_match = base:match("[Cc]hapter%s+(%d+[.,]?%d*)")
-    end
-    if not cap_match then
-        cap_match = base:match("#(%d+[.,]?%d*)")
-    end
-    if not cap_match then
-        cap_match = base:match("(%d+[.,]?%d*)[^%d]*$")
-    end
-    if not cap_match then
-        cap_match = base:match("(%d+[.,]?%d*)")
-    end
+    local patterns = {
+        "[Cc]ap[ií]tulo%s+(%d+[.,]%d+)",
+        "[Cc]hapter%s+(%d+[.,]%d+)",
+        "#(%d+[.,]%d+)",
+        "(%d+[.,]%d+)[^%d]*$",
+        "(%d+[.,]%d+)",
+        "(%d+)[^%d]*$",
+        "(%d+)"
+    }
     
-    if cap_match then
-        if cap_match:match("^%d+$") or cap_match:match("^%d+[.,]%d+$") then
-            local normalized = cap_match:gsub(",", ".")
+    for _, pattern in ipairs(patterns) do
+        local match = base:match(pattern)
+        if match then
+            local normalized = match:gsub(",", ".")
             local num = tonumber(normalized)
             if num and num < 10000 then
                 return {
                     full = num,
                     integer = math.floor(num),
-                    original = cap_match,
+                    original = match,
                     normalized = normalized
                 }
             end
@@ -148,10 +145,8 @@ local function inferFolderMetadata(folder)
         end
     end
     
-    -- Sort files alphabetically to get consistent results
     table.sort(files)
     
-    -- Find first file with valid metadata pattern
     for _, file in ipairs(files) do
         local meta = extractMetadataFromFilename(file)
         if meta and meta.title and meta.authors and meta.series then
@@ -159,7 +154,6 @@ local function inferFolderMetadata(folder)
         end
     end
     
-    -- Fallback: return first file with at least title and authors
     for _, file in ipairs(files) do
         local meta = extractMetadataFromFilename(file)
         if meta and meta.title and meta.authors then
@@ -198,25 +192,27 @@ local function parseFilename(filename)
 
     if count >= 2 then
         local lastField = fields[count]
-        local seriesName, seriesNum = lastField:match("^(.-)%s*#(%d+)%s*$")
+        local seriesName, seriesNum = lastField:match("^(.-)%s*#(%d+[.,]?%d*)%s*$")
 
         if seriesName then
-            meta.series       = trim(seriesName)
-            meta.series_index = tonumber(seriesNum)
+            meta.series = trim(seriesName)
+            local normalized = seriesNum:gsub(",", ".")
+            meta.series_index = tonumber(normalized)
             if count == 3 then
                 meta.authors = fields[2]
             elseif count >= 4 then
-                meta.authors  = fields[2]
+                meta.authors = fields[2]
                 meta.keywords = fields[3]
             end
         else
             meta.authors = fields[2]
             if count >= 3 then meta.keywords = fields[3] end
             if count >= 4 then
-                local s, n = fields[4]:match("^(.-)%s*#(%d+)%s*$")
+                local s, n = fields[4]:match("^(.-)%s*#(%d+[.,]?%d*)%s*$")
                 if s then
-                    meta.series       = trim(s)
-                    meta.series_index = tonumber(n)
+                    meta.series = trim(s)
+                    local normalized = n:gsub(",", ".")
+                    meta.series_index = tonumber(normalized)
                 else
                     meta.series = trim(fields[4])
                 end
@@ -235,8 +231,9 @@ local function buildFilename(meta, ext, includeNumberInTitle, fileNumber)
     local titleDisplay = title
     
     if includeNumberInTitle and fileNumber and fileNumber.full then
-        titleDisplay = title .. " #" .. fileNumber.full
-        titleForMeta = title .. " #" .. fileNumber.full
+        local num = fileNumber.full + 0
+        titleDisplay = title .. " #" .. num
+        titleForMeta = title .. " #" .. num
     end
 
     local parts = { titleDisplay }
@@ -250,9 +247,11 @@ local function buildFilename(meta, ext, includeNumberInTitle, fileNumber)
     local series = trim(meta.series or "")
     if series ~= "" then
         if meta.series_index then
-            table.insert(parts, series .. " #" .. meta.series_index)
-        elseif fileNumber and fileNumber.integer then
-            table.insert(parts, series .. " #" .. fileNumber.integer)
+            local num = meta.series_index + 0
+            table.insert(parts, series .. " #" .. num)
+        elseif fileNumber and fileNumber.full then
+            local num = fileNumber.full + 0
+            table.insert(parts, series .. " #" .. num)
         else
             table.insert(parts, series)
         end
@@ -489,7 +488,7 @@ function MetaFileExtract:showRenameForm(filepath)
             { description = "Series",        text = meta.series   or "", hint = "Series name" },
             { description = "Series number",
               text        = meta.series_index and tostring(meta.series_index) or (numInfo and tostring(numInfo.full) or ""),
-              hint        = "For series sorting only (e.g., 1 or 6.5)", input_type = "text" },
+              hint        = "For series sorting (e.g., 1 or 6.5)", input_type = "text" },
         },
         buttons = {
             {
@@ -524,7 +523,8 @@ function MetaFileExtract:showRenameForm(filepath)
                             return
                         end
 
-                        local newFilename, titleForMeta = buildFilename(newMeta, ext, false, nil)
+                        local fileNumber = seriesNum and { full = seriesNum, integer = math.floor(seriesNum) } or nil
+                        local newFilename, titleForMeta = buildFilename(newMeta, ext, false, fileNumber)
                         if not newFilename then
                             UIManager:show(InfoMessage:new{ text = "Failed to build filename.", timeout = 3 })
                             return
@@ -739,12 +739,19 @@ function MetaFileExtract:showBatchPreview(folder, fields, mode, includeNumber)
     local pairs_list = {}
     for _, e in ipairs(entries) do
         local ext = e.name:match("%.([^%.]+)$") or ""
+        local seriesIndex = e.num_info and e.num_info.full or e.seq
+        if type(seriesIndex) == "string" then
+            seriesIndex = tonumber(seriesIndex)
+        end
+        if seriesIndex then
+            seriesIndex = seriesIndex + 0
+        end
         local newMeta = {
             title        = baseMeta.title,
             authors      = baseMeta.authors,
             keywords     = baseMeta.keywords,
             series       = baseMeta.series,
-            series_index = e.num_info and e.num_info.integer or e.seq,
+            series_index = seriesIndex,
         }
         local newName = buildFilename(newMeta, ext, includeNumber, e.num_info) or e.name
         table.insert(pairs_list, { old = e.name, new = newName })
@@ -819,12 +826,19 @@ function MetaFileExtract:executeBatchRename(folder, fields, mode, includeNumber)
 
         for idx, e in ipairs(entries) do
             local ext = e.name:match("%.([^%.]+)$") or ""
+            local seriesIndex = e.num_info and e.num_info.full or e.seq
+            if type(seriesIndex) == "string" then
+                seriesIndex = tonumber(seriesIndex)
+            end
+            if seriesIndex then
+                seriesIndex = seriesIndex + 0
+            end
             local newMeta = {
                 title        = baseMeta.title,
                 authors      = baseMeta.authors,
                 keywords     = baseMeta.keywords,
                 series       = baseMeta.series,
-                series_index = e.num_info and e.num_info.integer or e.seq,
+                series_index = seriesIndex,
             }
 
             local newFilename, titleForMeta = buildFilename(newMeta, ext, includeNumber, e.num_info)
@@ -960,7 +974,7 @@ function MetaFileExtract:onExtract()
             
             local numInfo = extractDecimalNumber(filename)
             if numInfo and not meta.series_index then
-                meta.series_index = numInfo.integer
+                meta.series_index = numInfo.full
             end
 
             if meta.title then
