@@ -442,7 +442,7 @@ function MetaFileExtract:addToMainMenu(menu_items)
         sub_item_table = {
             {
                 text     = "Extract Metadata From Filenames",
-                callback = function() self:onExtract() end,
+                callback = function() self:showExtractPreview() end,
             },
             {
                 text     = "Rename All Files in Folder",
@@ -694,22 +694,6 @@ function MetaFileExtract:showBatchRenameForm(folder, values, mode, includeNumber
                         end)
                     end,
                 },
-                {
-                    text     = "Rename All",
-                    callback = function()
-                        local f = dialog:getFields()
-                        local err = validateBatchFields(f)
-                        if err then
-                            UIManager:show(InfoMessage:new{ text = err, timeout = 3 })
-                            return
-                        end
-                        local incNum = (f[6] or ""):match("%[x%] Include") ~= nil
-                        UIManager:close(dialog)
-                        MetaFileExtract:executeBatchRename(folder, {
-                            title=f[1], authors=f[2], keywords=f[3], series=f[4]
-                        }, mode, incNum)
-                    end,
-                },
             },
         },
     }
@@ -773,9 +757,22 @@ function MetaFileExtract:showBatchPreview(folder, fields, mode, includeNumber)
             local from = (page - 1) * PAGE_SIZE + 1
             local to   = math.min(page * PAGE_SIZE, #pairs_list)
             for i = from, to do
+                local e = entries[i]
                 local p = pairs_list[i]
                 table.insert(lines, p.old)
-                table.insert(lines, "  → " .. p.new)
+                table.insert(lines, "  Title:  " .. baseMeta.title
+                    .. (e and e.num_info and (" #" .. e.num_info.full) or ""))
+                if baseMeta.authors ~= "" then
+                    table.insert(lines, "  Author: " .. baseMeta.authors)
+                end
+                if baseMeta.keywords ~= "" then
+                    table.insert(lines, "  Tags:   " .. baseMeta.keywords)
+                end
+                if baseMeta.series ~= "" then
+                    local s = baseMeta.series
+                    if e and e.num_info then s = s .. " #" .. e.num_info.full end
+                    table.insert(lines, "  Series: " .. s)
+                end
                 if i < to then table.insert(lines, "") end
             end
 
@@ -933,10 +930,10 @@ function MetaFileExtract:scanFolder(folder)
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- BATCH EXTRACT
+-- EXTRACT PREVIEW
 -- ─────────────────────────────────────────────────────────────────────────────
 
-function MetaFileExtract:onExtract()
+function MetaFileExtract:showExtractPreview()
     if not FileManager.instance then return end
     local folder = FileManager.instance.file_chooser.path
 
@@ -948,52 +945,123 @@ function MetaFileExtract:onExtract()
         return
     end
 
-    Trapper:wrap(function()
-        local go = Trapper:confirm(
-            "Extract and sync .meta metadata in:\n" .. folder, "Cancel", "Continue")
-        if not go then return end
+    local files = MetaFileExtract:scanFolder(folder)
+    if #files == 0 then
+        UIManager:show(InfoMessage:new{ text = "No supported files found.", timeout = 3 })
+        return
+    end
 
-        local files = MetaFileExtract:scanFolder(folder)
-        if #files == 0 then
-            UIManager:show(InfoMessage:new{ text = "No files found.", timeout = 4 })
-            return
+    -- Parse all filenames upfront (no writes yet)
+    local parsed_list = {}
+    for _, filepath in ipairs(files) do
+        local filename = filepath:match("[^/]+$") or filepath
+        local meta     = parseFilename(filename)
+        local numInfo  = extractDecimalNumber(filename)
+        local desc     = getMetadataFile(folder, meta, filename)
+        if desc    then meta.description  = desc      end
+        if numInfo and not meta.series_index then
+            meta.series_index = numInfo.full
         end
+        table.insert(parsed_list, {
+            filepath = filepath,
+            filename = filename,
+            meta     = meta,
+            has_desc = desc ~= nil,
+        })
+    end
 
+    local PAGE_SIZE   = 8
+    local total_pages = math.max(1, math.ceil(#parsed_list / PAGE_SIZE))
+    local page        = 1
+
+    Trapper:wrap(function()
+        while true do
+            local lines = {}
+            table.insert(lines, "Extract Metadata Preview  [" .. #parsed_list .. " files]")
+            table.insert(lines, "Page " .. page .. "/" .. total_pages)
+            table.insert(lines, "")
+
+            local from = (page - 1) * PAGE_SIZE + 1
+            local to   = math.min(page * PAGE_SIZE, #parsed_list)
+
+            for i = from, to do
+                local entry = parsed_list[i]
+                local meta  = entry.meta
+
+                table.insert(lines, entry.filename)
+                table.insert(lines, "  Title:  " .. (meta.title or "?"))
+                if meta.authors and meta.authors ~= "" then
+                    table.insert(lines, "  Author: " .. meta.authors)
+                end
+                if meta.keywords and meta.keywords ~= "" then
+                    table.insert(lines, "  Tags:   " .. meta.keywords)
+                end
+                if meta.series and meta.series ~= "" then
+                    local s = meta.series
+                    if meta.series_index then s = s .. " #" .. meta.series_index end
+                    table.insert(lines, "  Series: " .. s)
+                end
+
+                if i < to then table.insert(lines, "") end
+            end
+
+            local btn_left  = page > 1          and "← Back" or "Cancel"
+            local btn_right = page < total_pages and "Next →" or "Extract All"
+
+            local go = Trapper:confirm(table.concat(lines, "\n"), btn_left, btn_right)
+
+            if go then
+                if page < total_pages then
+                    page = page + 1
+                else
+                    MetaFileExtract:executeExtract(parsed_list)
+                    return
+                end
+            else
+                if page > 1 then
+                    page = page - 1
+                else
+                    return  -- Cancel
+                end
+            end
+        end
+    end)
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- EXTRACT EXECUTE
+-- ─────────────────────────────────────────────────────────────────────────────
+
+function MetaFileExtract:executeExtract(parsed_list)
+    Trapper:wrap(function()
         local success = 0
-        for idx, filepath in ipairs(files) do
-            local filename = filepath:match("[^/]+$") or filepath
+        local total   = #parsed_list
 
+        for idx, entry in ipairs(parsed_list) do
             if idx % 5 == 0 or idx == 1 then
-                local doNotAbort = Trapper:info(T("Processing... %1/%2", idx, #files), true)
-                if not doNotAbort then Trapper:clear(); return end
+                local keep_going = Trapper:info(T("Processing... %1/%2", idx, total), true)
+                if not keep_going then Trapper:clear(); return end
             end
 
-            local meta = parseFilename(filename)
-            local desc = getMetadataFile(folder, meta, filename)
-            if desc then meta.description = desc end
-            
-            local numInfo = extractDecimalNumber(filename)
-            if numInfo and not meta.series_index then
-                meta.series_index = numInfo.full
-            end
-
-            if meta.title then
+            if entry.meta.title then
                 local complete, ok = Trapper:dismissableRunInSubprocess(function()
-                    return writeMetadata(filepath, meta)
+                    return writeMetadata(entry.filepath, entry.meta)
                 end)
                 if complete and ok then
                     success = success + 1
-                    UIManager:broadcastEvent(Event:new("InvalidateMetadataCache", filepath))
+                    UIManager:broadcastEvent(Event:new("InvalidateMetadataCache", entry.filepath))
                 end
             end
         end
 
         Trapper:clear()
         UIManager:show(InfoMessage:new{
-            text    = success .. "/" .. #files .. " metadata entries extracted.",
+            text    = success .. "/" .. total .. " metadata entries extracted.",
             timeout = 4,
         })
-        if FileManager.instance then FileManager.instance.file_chooser:refreshPath() end
+        if FileManager.instance then
+            FileManager.instance.file_chooser:refreshPath()
+        end
     end)
 end
 
