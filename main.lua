@@ -20,12 +20,9 @@ local SUPPORTED = {
     mobi=true, azw=true, azw3=true, fb2=true, djvu=true, zip=true,
 }
 
-local MODES = { "filename", "alpha", "date" }
-
 local MODE_LABELS = {
-    filename = "[x] From filename  [ ] Alphabetical  [ ] Date modified",
-    alpha    = "[ ] From filename  [x] Alphabetical  [ ] Date modified",
-    date     = "[ ] From filename  [ ] Alphabetical  [x] Date modified",
+    filename = "[x] From filename  [ ] Date modified",
+    date     = "[ ] From filename  [x] Date modified",
 }
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -43,17 +40,23 @@ end
 local function extractDecimalNumber(filename)
     local base = stripExtension(filename)
 
-    -- Strip Mihon-style trailing hash (6-8 hex chars) preceded by _ - or space.
+    -- Strip Mihon-style trailing hash: 6-8 hex chars preceded by _ - or space.
     -- e.g. "ArinVale_Capítulo 72_024a46" → "ArinVale_Capítulo 72"
     --      "#0.2 - O Retorno)a1a7f7"    → "#0.2 - O Retorno)"
-    -- Lua has no {n,m} quantifier: 6 fixed + 2 optional hex chars.
+    -- Lua has no {n,m} quantifier: match 6 fixed + up to 2 optional hex chars.
     local h = "[0-9a-fA-F]"
     local search = base:match("^(.+)[_%- ]" .. h..h..h..h..h..h .. h.."?".. h.."?$") or base
 
+    -- KOReader runs LuaJIT which treats strings as raw bytes, so UTF-8 multi-byte
+    -- chars like í (0xC3 0xAD) don't match inside [...] char classes.
+    -- Use the literal UTF-8 byte sequence "\xC3\xAD" instead of 'í' in patterns.
+    local i_utf8 = "\xC3\xAD"
     local patterns = {
-        "[Cc]ap[ií]tulo%s+(%d+[.,]%d+)",
+        "[Cc]ap" .. i_utf8 .. "tulo%s+(%d+[.,]%d+)",
+        "[Cc]ap" .. i_utf8 .. "tulo%s+(%d+)",
+        "[Cc]apitulo%s+(%d+[.,]%d+)",
+        "[Cc]apitulo%s+(%d+)",
         "[Cc]hapter%s+(%d+[.,]%d+)",
-        "[Cc]ap[ií]tulo%s+(%d+)",
         "[Cc]hapter%s+(%d+)",
         "#(%d+[.,]%d+)",
         "#(%d+)",
@@ -311,7 +314,14 @@ local function sortFiles(files, mode)
             return a.name < b.name
         end)
     else
-        table.sort(entries, function(a, b) return a.name < b.name end)
+        table.sort(entries, function(a, b)
+            if a.sort_key and b.sort_key then
+                return a.sort_key < b.sort_key
+            end
+            if a.sort_key then return true end
+            if b.sort_key then return false end
+            return a.name < b.name
+        end)
     end
 
     for i, e in ipairs(entries) do
@@ -624,15 +634,12 @@ function MetaFileExtract:showBatchRenameForm(folder, values, mode, includeNumber
         or  "[ ] Include #number  [x] Don't include"
 
     local function getNextMode(current)
-        if current == "filename" then return "alpha"
-        elseif current == "alpha" then return "date"
+        if current == "filename" then return "date"
         else return "filename" end
     end
 
     local function getModeLabel(m)
-        if m == "filename" then return MODE_LABELS.filename
-        elseif m == "alpha" then return MODE_LABELS.alpha
-        else return MODE_LABELS.date end
+        return MODE_LABELS[m] or MODE_LABELS.filename
     end
 
     local dialog
@@ -751,7 +758,7 @@ function MetaFileExtract:showBatchPreview(folder, fields, mode, includeNumber)
         table.insert(pairs_list, { old = e.name, new = newName })
     end
 
-    local modeLabel = ({ filename="From filename", alpha="Alphabetical", date="Date modified" })[mode]
+    local modeLabel = ({ filename="From filename", date="Date modified" })[mode] or "From filename"
     local numLabel  = includeNumber and " · #number on" or " · #number off"
     local PAGE_SIZE = 8
     local total_pages = math.ceil(#pairs_list / PAGE_SIZE)
