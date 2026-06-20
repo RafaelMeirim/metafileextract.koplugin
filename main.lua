@@ -42,33 +42,43 @@ end
 
 local function extractDecimalNumber(filename)
     local base = stripExtension(filename)
-    
+
+    -- Strip Mihon-style trailing hash (6-8 hex chars) preceded by _ - or space.
+    -- e.g. "ArinVale_Capítulo 72_024a46" → "ArinVale_Capítulo 72"
+    --      "#0.2 - O Retorno)a1a7f7"    → "#0.2 - O Retorno)"
+    -- Lua has no {n,m} quantifier: 6 fixed + 2 optional hex chars.
+    local h = "[0-9a-fA-F]"
+    local search = base:match("^(.+)[_%- ]" .. h..h..h..h..h..h .. h.."?".. h.."?$") or base
+
     local patterns = {
         "[Cc]ap[ií]tulo%s+(%d+[.,]%d+)",
         "[Cc]hapter%s+(%d+[.,]%d+)",
+        "[Cc]ap[ií]tulo%s+(%d+)",
+        "[Cc]hapter%s+(%d+)",
         "#(%d+[.,]%d+)",
+        "#(%d+)",
         "(%d+[.,]%d+)[^%d]*$",
         "(%d+[.,]%d+)",
         "(%d+)[^%d]*$",
         "(%d+)"
     }
-    
+
     for _, pattern in ipairs(patterns) do
-        local match = base:match(pattern)
+        local match = search:match(pattern)
         if match then
             local normalized = match:gsub(",", ".")
             local num = tonumber(normalized)
             if num and num < 10000 then
                 return {
-                    full = num,
-                    integer = math.floor(num),
-                    original = match,
-                    normalized = normalized
+                    full       = num,
+                    integer    = math.floor(num),
+                    original   = match,
+                    normalized = normalized,
                 }
             end
         end
     end
-    
+
     return nil
 end
 
